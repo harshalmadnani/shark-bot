@@ -131,6 +131,26 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (path === "/order-status" && req.method === "GET") {
+    const token = process.env.ORDER_TOKEN;
+    if (!token || req.headers["x-order-token"] !== token) {
+      sendJson(res, 404, { ok: false });
+      return;
+    }
+    Promise.all([
+      sharkGet("/v1/order/m-c4834d356434dffacecd-948022-sha", {}),
+      sharkGet("/v1/positions/OPEN", { symbol: "DOGEUSDT", sortOrder: "desc", pageSize: "5" }),
+    ])
+      .then(([order, positions]) => sendJson(res, 200, {
+        orderStatus: order.status,
+        order: order.body,
+        positionsStatus: positions.status,
+        positions: positions.body,
+      }))
+      .catch((error) => sendJson(res, 500, { ok: false, message: error.message }));
+    return;
+  }
+
   if (path === "/place-test-order" && req.method === "POST") {
     const token = process.env.ORDER_TOKEN;
     if (!token || req.headers["x-order-token"] !== token) {
