@@ -184,8 +184,10 @@ server.listen(port, "0.0.0.0", () => {
   console.log(`Shark Bot listening on 0.0.0.0:${port}`);
   store.migrate()
     .then(() => {
-      setTimeout(() => runDue().catch((error) => console.error("rebalance", error.message)), 15000);
-      setInterval(() => runDue().catch((error) => console.error("rebalance", error.message)), 15 * 60 * 1000);
+      console.log("database ready");
+      const run = () => runDue().catch((error) => console.error("rebalance", error.message));
+      setTimeout(run, 5000);
+      setInterval(run, 15 * 60 * 1000);
     })
     .catch((error) => console.error("database", error.message));
 });

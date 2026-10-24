@@ -107,6 +107,25 @@ async function openPositions(client) {
   return qty;
 }
 
+async function setLeverage(client, symbol, leverage, state) {
+  if (state.mode !== "LEVERAGE_ONLY") {
+    const preference = await client.post("/v1/exchange/update/preference", {
+      leverage,
+      marginMode: state.mode,
+      contractName: symbol,
+    });
+    const preferenceError = sharkError(preference);
+    if (!preferenceError) return null;
+    if (!/cross margin is not enabled/i.test(preferenceError)) return preferenceError;
+    state.mode = "LEVERAGE_ONLY";
+  }
+  const updated = await client.post("/v1/exchange/update/leverage", {
+    leverage,
+    contractName: symbol,
+  });
+  return sharkError(updated);
+}
+
 async function place(client, symbol, delta, precision) {
   const quantity = roundQty(Math.abs(delta), precision);
   if (!(quantity > 0)) return null;
@@ -179,7 +198,7 @@ async function rebalanceAccount(id) {
     const positions = await openPositions(client);
     const leverage = leverageForGross(grossOf(book.weights), 100);
     const errors = [];
-    let marginMode = "CROSS";
+    const marginState = { mode: "CROSS" };
     const symbols = new Set([...positions.keys()]);
     for (const coin of UNIVERSE) symbols.add(`${coin}USDT`);
 
@@ -209,27 +228,13 @@ async function rebalanceAccount(id) {
       const maxLeverage = contract ? contract.maxLeverage : leverage;
       const symbolLeverage = leverageForGross(grossOf(book.weights), maxLeverage);
       try {
-        let preference = await client.post("/v1/exchange/update/preference", {
-          leverage: symbolLeverage,
-          marginMode,
-          contractName: symbol,
-        });
-        let preferenceError = sharkError(preference);
-        if (preferenceError && marginMode === "CROSS" && /cross margin is not enabled/i.test(preferenceError)) {
-          marginMode = "ISOLATED";
-          preference = await client.post("/v1/exchange/update/preference", {
-            leverage: symbolLeverage,
-            marginMode,
-            contractName: symbol,
-          });
-          preferenceError = sharkError(preference);
-        }
+        const preferenceError = await setLeverage(client, symbol, symbolLeverage, marginState);
         if (preferenceError && !closing) {
-          errors.push(`${symbol} leverage: ${preferenceError}`);
+          errors.push(`${symbol} leverage (${marginState.mode}): ${preferenceError}`);
           await sleep(150);
           continue;
         }
-        if (preferenceError) errors.push(`${symbol} leverage: ${preferenceError}`);
+        if (preferenceError) errors.push(`${symbol} leverage (${marginState.mode}): ${preferenceError}`);
         await place(client, symbol, delta, precision);
       } catch (error) {
         errors.push(error.message);
@@ -243,6 +248,7 @@ async function rebalanceAccount(id) {
       halted: false,
       lastError: errors.length ? errors.join("; ") : null,
     });
+    console.log(`rebalance ${id} mode=${marginState.mode} errors=${errors.length}`);
     return { date: book.date, weights: book.weights, equity, errors };
   } catch (error) {
     await store.markRun(id, {
@@ -269,10 +275,9 @@ async function flattenAccount(id) {
 async function runDue() {
   const today = utcDay();
   const accounts = await store.listTradable();
-  for (const account of accounts) {
-    if (account.last_rebalance_day === today) continue;
-    await rebalanceAccount(account.id);
-  }
+  const due = accounts.filter((account) => account.last_rebalance_day !== today);
+  console.log(`rebalance due ${due.length}`);
+  for (const account of due) await rebalanceAccount(account.id);
 }
 
 function isRunning(id) {
