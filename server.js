@@ -68,8 +68,8 @@ async function placeUsdtTrade() {
     { Accept: "application/json" }
   );
   const last = Number(ticker.body && ticker.body.data && ticker.body.data.c);
-  const futures = await sharkGet("/v1/wallet/futures-wallet/details", { marginAsset: "USDT" });
-  const funding = await sharkGet("/v1/wallet/funding-wallet/details", { marginAsset: "USDT" });
+  const futures = await sharkGet("/v1/wallet/futures-wallet/details", { marginAsset: "INR" });
+  const funding = await sharkGet("/v1/wallet/funding-wallet/details", { marginAsset: "INR" });
 
   if (!Number.isFinite(last) || last <= 0) {
     return { step: "ticker", ticker, futures, funding };
@@ -85,7 +85,7 @@ async function placeUsdtTrade() {
     side: "BUY",
     symbol: "DOGEUSDT",
     reduceOnly: false,
-    marginAsset: "USDT",
+    marginAsset: "INR",
     type: "MARKET",
   };
 
@@ -106,7 +106,7 @@ async function placeUsdtTrade() {
     last,
     quantity,
     notional: Math.round(quantity * last * 1000) / 1000,
-    marginAsset: "USDT",
+    marginAsset: "INR",
     futuresStatus: futures.status,
     futures: futures.body,
     fundingStatus: funding.status,
