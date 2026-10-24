@@ -96,6 +96,7 @@ async function placeOneLimitOrder() {
   const wallet = await sharkGet("/v1/wallet/futures-wallet/details", {
     marginAsset: "INR",
   });
+  const funding = await sharkGet("/v1/wallet/funding-wallet/details", {});
   const order = await sharkPost("/v1/order/place-order", {
     placeType: "ORDER_FORM",
     quantity,
@@ -117,6 +118,8 @@ async function placeOneLimitOrder() {
     notional: roundTo(quantity * price, 3),
     walletStatus: wallet.status,
     wallet: wallet.body,
+    fundingStatus: funding.status,
+    funding: funding.body,
     orderStatus: order.status,
     order: order.body,
   };
