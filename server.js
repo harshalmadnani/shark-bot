@@ -3,7 +3,7 @@ const http = require("http");
 const store = require("./store");
 const { SharkClient, sharkError } = require("./shark");
 const { rebalanceAccount, flattenAccount, runDue, isRunning } = require("./rebalance");
-const { loadPortfolio } = require("./portfolio");
+const { loadPortfolio, quotes } = require("./portfolio");
 
 const port = Number(process.env.PORT) || 3000;
 const hits = new Map();
@@ -105,6 +105,12 @@ async function handle(req, res) {
       return;
     }
     sendJson(res, 401, { error: "Unauthorized" });
+    return;
+  }
+
+  if (req.method === "GET" && path === "/prices") {
+    const symbols = (url.searchParams.get("symbols") || "").split(",");
+    sendJson(res, 200, await quotes(symbols));
     return;
   }
 

@@ -1,4 +1,4 @@
-const { SharkClient, sharkError } = require("./shark");
+const { SharkClient, sharkError, requestJson } = require("./shark");
 const store = require("./store");
 
 function asList(body) {
@@ -19,6 +19,41 @@ function text(value) {
   if (value == null) return null;
   const out = String(value).trim();
   return out || null;
+}
+
+let rateCache = { at: 0, rate: null };
+
+async function inrPerUsdt() {
+  if (rateCache.rate && Date.now() - rateCache.at < 60_000) return rateCache.rate;
+  const response = await requestJson("GET", "/v1/exchange/exchangeInfo?market=USDT", {
+    Accept: "application/json",
+  });
+  const rate = num(response.body && response.body.conversionRates && response.body.conversionRates.INR_MARGIN_USDT);
+  if (rate) rateCache = { at: Date.now(), rate };
+  return rateCache.rate || 102;
+}
+
+async function lastPrice(symbol) {
+  const response = await requestJson("GET", `/v1/market/ticker24Hr/${encodeURIComponent(symbol)}`, {
+    Accept: "application/json",
+  });
+  if (!response || response.status >= 400) return null;
+  const data = response.body && response.body.data ? response.body.data : response.body;
+  return num(data && (data.c ?? data.lastPrice));
+}
+
+async function quotes(symbols) {
+  const unique = [...new Set(symbols.map((symbol) => String(symbol || "").toUpperCase()))]
+    .filter((symbol) => /^[A-Z0-9]{2,20}$/.test(symbol))
+    .slice(0, 20);
+  const [rate, priced] = await Promise.all([
+    inrPerUsdt(),
+    Promise.all(unique.map(async (symbol) => [symbol, await lastPrice(symbol)])),
+  ]);
+  return {
+    rate,
+    prices: Object.fromEntries(priced.filter(([, price]) => price != null)),
+  };
 }
 
 async function readList(client, path) {
@@ -87,17 +122,22 @@ async function loadPortfolio(row) {
 
   const positionError = sharkError(positions);
   const positionRows = positionError ? [] : asList(positions.body);
+  const mapped = positionRows.map(mapPosition).filter((position) => position.symbol);
+  const market = await quotes(mapped.map((position) => position.symbol)).catch(() => ({ rate: null, prices: {} }));
+  for (const position of mapped) position.markPrice = market.prices[position.symbol] ?? null;
 
   return {
     connected: true,
     ...store.publicAccount(row),
-    valueInr: marginBalance != null ? marginBalance : walletBalance,
+    valueInr: walletBalance,
     walletBalance,
+    marginBalance,
+    inrPerUsdt: market.rate,
     unrealizedPnlInr: walletError ? null : isolatedPnl + crossPnl,
     lockedInr: num(body && body.lockedBalance),
     asset: "INR",
     walletError,
-    positions: positionRows.map(mapPosition).filter((position) => position.symbol),
+    positions: mapped,
     positionsError: positionError,
     trades: trades.rows.map(mapTrade).filter((trade) => trade.symbol),
     tradesError: trades.error,
@@ -106,4 +146,4 @@ async function loadPortfolio(row) {
   };
 }
 
-module.exports = { loadPortfolio };
+module.exports = { loadPortfolio, quotes };
