@@ -4,7 +4,11 @@
   "private": true,
   "description": "Shark Bot web service",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test book.test.js"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
   },
   "engines": {
     "node": ">=20"
