@@ -3,6 +3,7 @@ const http = require("http");
 const store = require("./store");
 const { SharkClient, sharkError } = require("./shark");
 const { rebalanceAccount, flattenAccount, runDue, isRunning } = require("./rebalance");
+const { loadPortfolio } = require("./portfolio");
 
 const port = Number(process.env.PORT) || 3000;
 const hits = new Map();
@@ -108,6 +109,18 @@ async function handle(req, res) {
   }
 
   const accountMatch = path.match(/^\/accounts\/([0-9a-f-]{36})$/i);
+  const portfolioMatch = path.match(/^\/accounts\/([0-9a-f-]{36})\/portfolio$/i);
+
+  if (portfolioMatch && req.method === "GET") {
+    const row = await store.getAccount(portfolioMatch[1]);
+    if (!row) {
+      sendJson(res, 404, { error: "Account not found" });
+      return;
+    }
+    const portfolio = await loadPortfolio(row);
+    sendJson(res, 200, portfolio);
+    return;
+  }
 
   if (req.method === "POST" && path === "/accounts") {
     if (limited(clientIp(req))) {
