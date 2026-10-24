@@ -1,0 +1,12 @@
+{
+  "name": "shark-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Shark Bot web service",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
