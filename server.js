@@ -61,6 +61,8 @@ function sendJson(res, status, body) {
 }
 
 function clientIp(req) {
+  const fromApp = req.headers["x-client-ip"];
+  if (typeof fromApp === "string" && fromApp.length && fromApp.length < 80) return fromApp.trim();
   const forwarded = req.headers["x-forwarded-for"];
   if (typeof forwarded === "string" && forwarded.length) return forwarded.split(",")[0].trim();
   return req.socket.remoteAddress || "unknown";

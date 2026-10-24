@@ -213,6 +213,11 @@ async function rebalanceAccount(id) {
           contractName: symbol,
         });
         const preferenceError = sharkError(preference);
+        if (preferenceError && !closing) {
+          errors.push(`${symbol} leverage: ${preferenceError}`);
+          await sleep(150);
+          continue;
+        }
         if (preferenceError) errors.push(`${symbol} leverage: ${preferenceError}`);
         await place(client, symbol, delta, precision);
       } catch (error) {
