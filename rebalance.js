@@ -179,6 +179,7 @@ async function rebalanceAccount(id) {
     const positions = await openPositions(client);
     const leverage = leverageForGross(grossOf(book.weights), 100);
     const errors = [];
+    let marginMode = "CROSS";
     const symbols = new Set([...positions.keys()]);
     for (const coin of UNIVERSE) symbols.add(`${coin}USDT`);
 
@@ -206,13 +207,23 @@ async function rebalanceAccount(id) {
       if (closing && quantity < minQty) continue;
 
       const maxLeverage = contract ? contract.maxLeverage : leverage;
+      const symbolLeverage = leverageForGross(grossOf(book.weights), maxLeverage);
       try {
-        const preference = await client.post("/v1/exchange/update/preference", {
-          leverage: leverageForGross(grossOf(book.weights), maxLeverage),
-          marginMode: "CROSS",
+        let preference = await client.post("/v1/exchange/update/preference", {
+          leverage: symbolLeverage,
+          marginMode,
           contractName: symbol,
         });
-        const preferenceError = sharkError(preference);
+        let preferenceError = sharkError(preference);
+        if (preferenceError && marginMode === "CROSS" && /cross margin is not enabled/i.test(preferenceError)) {
+          marginMode = "ISOLATED";
+          preference = await client.post("/v1/exchange/update/preference", {
+            leverage: symbolLeverage,
+            marginMode,
+            contractName: symbol,
+          });
+          preferenceError = sharkError(preference);
+        }
         if (preferenceError && !closing) {
           errors.push(`${symbol} leverage: ${preferenceError}`);
           await sleep(150);
