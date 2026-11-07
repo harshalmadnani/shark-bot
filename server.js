@@ -2,7 +2,7 @@ const crypto = require("crypto");
 const http = require("http");
 const store = require("./store");
 const { SharkClient, sharkError } = require("./shark");
-const { rebalanceAccount, flattenAccount, runDue, isRunning } = require("./rebalance");
+const { rebalanceAccount, flattenAccount, runDue, isRunning, equityOf } = require("./rebalance");
 const { loadPortfolio, quotes } = require("./portfolio");
 
 const port = Number(process.env.PORT) || 3000;
@@ -114,6 +114,23 @@ async function handle(req, res) {
     return;
   }
 
+  if (req.method === "GET" && path === "/activity/summary") {
+    sendJson(res, 200, { summary: await store.activitySummary() });
+    return;
+  }
+
+  if (req.method === "GET" && path === "/activity") {
+    sendJson(res, 200, {
+      activity: await store.listActivity({
+        book: url.searchParams.get("book") || "",
+        accountId: url.searchParams.get("accountId") || "",
+        kind: url.searchParams.get("kind") || "",
+        limit: url.searchParams.get("limit"),
+      }),
+    });
+    return;
+  }
+
   const accountMatch = path.match(/^\/accounts\/([0-9a-f-]{36})$/i);
   const portfolioMatch = path.match(/^\/accounts\/([0-9a-f-]{36})\/portfolio$/i);
 
@@ -147,7 +164,19 @@ async function handle(req, res) {
       sendJson(res, 400, { error: walletError });
       return;
     }
-    const accountId = await store.saveAccount(apiKey, apiSecret);
+    const book = body.book === "moon" ? "moon" : "alpha";
+    const ownerId = String(body.ownerId || "").trim() || null;
+    const accountId = await store.saveAccount(apiKey, apiSecret, { book, ownerId });
+    const equity = equityOf(wallet.body);
+    await store.recordActivity({
+      book,
+      accountId,
+      ownerId,
+      kind: "connect",
+      equity,
+      ok: true,
+      detail: apiKey.length > 8 ? `${apiKey.slice(0, 4)}…${apiKey.slice(-4)}` : "key",
+    });
     rebalanceAccount(accountId).catch((error) => {
       console.error("rebalance", accountId, error.message);
     });
@@ -181,9 +210,24 @@ async function handle(req, res) {
     try {
       await flattenAccount(row.id);
     } catch (error) {
+      await store.recordActivity({
+        book: row.book,
+        accountId: row.id,
+        ownerId: row.owner_id,
+        kind: "disconnect",
+        ok: false,
+        detail: error.message,
+      });
       sendJson(res, 502, { error: error.message });
       return;
     }
+    await store.recordActivity({
+      book: row.book,
+      accountId: row.id,
+      ownerId: row.owner_id,
+      kind: "disconnect",
+      ok: true,
+    });
     await store.deleteAccount(row.id);
     sendJson(res, 200, { disconnected: true });
     return;

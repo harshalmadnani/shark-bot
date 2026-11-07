@@ -126,6 +126,16 @@ async function setLeverage(client, symbol, leverage, state) {
   return sharkError(updated);
 }
 
+function track(row, fields) {
+  return store.recordActivity({
+    book: row?.book || null,
+    accountId: row?.id || null,
+    ownerId: row?.owner_id || null,
+    equity: fields.equity,
+    ...fields,
+  });
+}
+
 async function place(client, symbol, delta, precision) {
   const quantity = roundQty(Math.abs(delta), precision);
   if (!(quantity > 0)) return null;
@@ -143,7 +153,7 @@ async function place(client, symbol, delta, precision) {
   return response.body;
 }
 
-async function flatten(client, info) {
+async function flatten(client, info, row) {
   const positions = await openPositions(client);
   const orders = [];
   for (const [symbol, qty] of positions) {
@@ -153,19 +163,30 @@ async function flatten(client, info) {
     const minQty = contract ? contract.minQty : 0;
     const quantity = roundQty(Math.abs(qty), precision);
     if (quantity < minQty) continue;
-    orders.push(await place(client, symbol, -qty, precision));
+    const side = qty > 0 ? "SELL" : "BUY";
+    try {
+      orders.push(await place(client, symbol, -qty, precision));
+      await track(row, { kind: "order", symbol, side, quantity, ok: true, detail: "flatten" });
+    } catch (error) {
+      await track(row, { kind: "order", symbol, side, quantity, ok: false, detail: error.message });
+      throw error;
+    }
     await sleep(150);
   }
   return orders.filter(Boolean);
 }
 
 async function rebalanceAccount(id) {
-  if (running.has(id)) return { skipped: true };
+  if (running.has(id)) {
+    await store.recordActivity({ accountId: id, kind: "skip", ok: false, detail: "already running" });
+    return { skipped: true };
+  }
   running.add(id);
   const today = utcDay();
   try {
     const row = await store.getAccount(id);
     if (!row) return { missing: true };
+    await track(row, { kind: "rebalance", ok: true, detail: "started" });
     const client = new SharkClient(row.api_key, await store.secretOf(row));
     const wallet = await client.get("/v1/wallet/futures-wallet/details", { marginAsset: "INR" });
     const walletError = sharkError(wallet);
@@ -175,17 +196,19 @@ async function rebalanceAccount(id) {
     const info = await exchangeInfo();
 
     if (row.halted) {
+      await track(row, { kind: "halt", equity, ok: false, detail: "already halted" });
       return { halted: true };
     }
 
     if (shouldHalt(equity, peak)) {
-      await flatten(client, info);
+      await flatten(client, info, row);
       await store.markRun(id, {
         peakEquity: peak,
         lastRebalanceDay: today,
         halted: true,
         lastError: null,
       });
+      await track(row, { kind: "halt", equity, ok: true, detail: "75% drawdown" });
       return { halted: true, equity };
     }
 
@@ -217,13 +240,27 @@ async function rebalanceAccount(id) {
       const delta = roundQty(target, precision) - roundQty(current, precision);
       const quantity = roundQty(Math.abs(delta), precision);
       if (!(quantity > 0)) continue;
+      const side = delta > 0 ? "BUY" : "SELL";
       const closing = roundQty(target, precision) === 0;
-      if (!closing && quantity < minQty) continue;
       const notionalUsdt = quantity * (price || 0);
       const notionalInr = notionalUsdt * info.rate;
-      if (!closing && notionalInr <= equity * RULES.rebalanceBand) continue;
-      if (!closing && contract && notionalUsdt < contract.minNotional) continue;
-      if (closing && quantity < minQty) continue;
+      const orderFields = { kind: "order", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity };
+      if (!closing && quantity < minQty) {
+        await track(row, { kind: "skip", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity, ok: false, detail: "below min quantity" });
+        continue;
+      }
+      if (!closing && notionalInr <= equity * RULES.rebalanceBand) {
+        await track(row, { kind: "skip", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity, ok: false, detail: "inside rebalance band" });
+        continue;
+      }
+      if (!closing && contract && notionalUsdt < contract.minNotional) {
+        await track(row, { kind: "skip", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity, ok: false, detail: "below min notional" });
+        continue;
+      }
+      if (closing && quantity < minQty) {
+        await track(row, { kind: "skip", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity, ok: false, detail: "close below min quantity" });
+        continue;
+      }
 
       const maxLeverage = contract ? contract.maxLeverage : leverage;
       const symbolLeverage = leverageForGross(grossOf(book.weights), maxLeverage);
@@ -231,13 +268,16 @@ async function rebalanceAccount(id) {
         const preferenceError = await setLeverage(client, symbol, symbolLeverage, marginState);
         if (preferenceError && !closing) {
           errors.push(`${symbol} leverage (${marginState.mode}): ${preferenceError}`);
+          await track(row, { ...orderFields, ok: false, detail: preferenceError });
           await sleep(150);
           continue;
         }
         if (preferenceError) errors.push(`${symbol} leverage (${marginState.mode}): ${preferenceError}`);
         await place(client, symbol, delta, precision);
+        await track(row, { ...orderFields, ok: true, detail: preferenceError || null });
       } catch (error) {
         errors.push(error.message);
+        await track(row, { ...orderFields, ok: false, detail: error.message });
       }
       await sleep(150);
     }
@@ -249,14 +289,22 @@ async function rebalanceAccount(id) {
       lastError: errors.length ? errors.join("; ") : null,
     });
     console.log(`rebalance ${id} mode=${marginState.mode} errors=${errors.length}`);
+    await track(row, {
+      kind: "rebalance",
+      equity,
+      ok: errors.length === 0,
+      detail: `finished mode=${marginState.mode} errors=${errors.length}`,
+    });
     return { date: book.date, weights: book.weights, equity, errors };
   } catch (error) {
+    const saved = await store.getAccount(id).catch(() => null);
     await store.markRun(id, {
-      peakEquity: (await store.getAccount(id))?.peak_equity ?? null,
-      lastRebalanceDay: (await store.getAccount(id))?.last_rebalance_day ?? null,
+      peakEquity: saved?.peak_equity ?? null,
+      lastRebalanceDay: saved?.last_rebalance_day ?? null,
       halted: false,
       lastError: error.message,
     }).catch(() => {});
+    await track(saved || { id, book: null, owner_id: null }, { kind: "error", ok: false, detail: error.message });
     return { error: error.message };
   } finally {
     running.delete(id);
@@ -268,7 +316,7 @@ async function flattenAccount(id) {
   if (!row) return { missing: true };
   const client = new SharkClient(row.api_key, await store.secretOf(row));
   const info = await exchangeInfo();
-  await flatten(client, info);
+  await flatten(client, info, row);
   return { flattened: true };
 }
 
@@ -284,4 +332,4 @@ function isRunning(id) {
   return running.has(id);
 }
 
-module.exports = { rebalanceAccount, flattenAccount, runDue, isRunning, utcDay };
+module.exports = { rebalanceAccount, flattenAccount, runDue, isRunning, utcDay, equityOf };

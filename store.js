@@ -63,27 +63,123 @@ async function migrate() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await getPool().query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS book TEXT");
+  await getPool().query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS owner_id TEXT");
+  await getPool().query(`
+    CREATE TABLE IF NOT EXISTS activity (
+      id BIGSERIAL PRIMARY KEY,
+      at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      book TEXT,
+      account_id TEXT,
+      owner_id TEXT,
+      kind TEXT NOT NULL,
+      symbol TEXT,
+      side TEXT,
+      quantity DOUBLE PRECISION,
+      price DOUBLE PRECISION,
+      notional_usd DOUBLE PRECISION,
+      equity DOUBLE PRECISION,
+      ok BOOLEAN,
+      detail TEXT
+    )
+  `);
+  await getPool().query("CREATE INDEX IF NOT EXISTS activity_book_at ON activity (book, at DESC)");
+  await getPool().query("CREATE INDEX IF NOT EXISTS activity_account_at ON activity (account_id, at DESC)");
 }
 
-async function saveAccount(apiKey, apiSecret) {
+function num(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** One row per connect, rebalance, order, skip, halt, or failure. Secrets are never written. */
+async function recordActivity(event) {
+  try {
+    await getPool().query(
+      `INSERT INTO activity (book, account_id, owner_id, kind, symbol, side, quantity, price, notional_usd, equity, ok, detail)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [
+        event.book || null,
+        event.accountId || null,
+        event.ownerId || null,
+        String(event.kind || "event").slice(0, 40),
+        event.symbol || null,
+        event.side || null,
+        num(event.quantity),
+        num(event.price),
+        num(event.notionalUsd),
+        num(event.equity),
+        typeof event.ok === "boolean" ? event.ok : null,
+        event.detail ? String(event.detail).slice(0, 2000) : null,
+      ]
+    );
+  } catch (error) {
+    console.error("activity", error.message);
+  }
+}
+
+async function listActivity({ book, accountId, kind, limit } = {}) {
+  const where = [];
+  const params = [];
+  if (book) {
+    params.push(book);
+    where.push(`book = $${params.length}`);
+  }
+  if (accountId) {
+    params.push(accountId);
+    where.push(`account_id = $${params.length}`);
+  }
+  if (kind) {
+    params.push(kind);
+    where.push(`kind = $${params.length}`);
+  }
+  params.push(Math.min(Math.max(Number(limit) || 100, 1), 1000));
+  const result = await getPool().query(
+    `SELECT id, at, book, account_id, owner_id, kind, symbol, side, quantity, price, notional_usd, equity, ok, detail
+     FROM activity ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+     ORDER BY at DESC
+     LIMIT $${params.length}`,
+    params
+  );
+  return result.rows;
+}
+
+async function activitySummary() {
+  const result = await getPool().query(`
+    SELECT COALESCE(book, 'untagged') AS book,
+           kind,
+           count(*)::int AS events,
+           count(DISTINCT account_id)::int AS accounts,
+           coalesce(sum(notional_usd) FILTER (WHERE ok IS TRUE AND kind = 'order'), 0)::float8 AS filled_notional_usd
+    FROM activity
+    GROUP BY 1, 2
+    ORDER BY 1, 2
+  `);
+  return result.rows;
+}
+
+async function saveAccount(apiKey, apiSecret, meta = {}) {
   const sealed = encrypt(apiSecret);
+  const book = meta.book || null;
+  const ownerId = meta.ownerId || null;
   const existing = await getPool().query("SELECT id FROM accounts WHERE api_key = $1", [apiKey]);
   if (existing.rows[0]) {
     const id = existing.rows[0].id;
     await getPool().query(
       `UPDATE accounts
        SET secret_ciphertext = $2, secret_iv = $3, secret_tag = $4,
-           halted = FALSE, peak_equity = NULL, last_rebalance_day = NULL, last_error = NULL
+           halted = FALSE, peak_equity = NULL, last_rebalance_day = NULL, last_error = NULL,
+           book = COALESCE($5, book), owner_id = COALESCE($6, owner_id)
        WHERE id = $1`,
-      [id, sealed.ciphertext, sealed.iv, sealed.tag]
+      [id, sealed.ciphertext, sealed.iv, sealed.tag, book, ownerId]
     );
     return id;
   }
   const id = crypto.randomUUID();
   await getPool().query(
-    `INSERT INTO accounts (id, api_key, secret_ciphertext, secret_iv, secret_tag)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [id, apiKey, sealed.ciphertext, sealed.iv, sealed.tag]
+    `INSERT INTO accounts (id, api_key, secret_ciphertext, secret_iv, secret_tag, book, owner_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [id, apiKey, sealed.ciphertext, sealed.iv, sealed.tag, book, ownerId]
   );
   return id;
 }
@@ -128,6 +224,8 @@ function publicAccount(row) {
     lastRunAt: row.last_run_at,
     lastError: row.last_error,
     peakEquity: row.peak_equity,
+    book: row.book || null,
+    ownerId: row.owner_id || null,
   };
 }
 
@@ -140,4 +238,7 @@ module.exports = {
   markRun,
   deleteAccount,
   publicAccount,
+  recordActivity,
+  listActivity,
+  activitySummary,
 };
