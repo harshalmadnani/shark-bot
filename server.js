@@ -69,6 +69,26 @@ function clientIp(req) {
   return req.socket.remoteAddress || "unknown";
 }
 
+async function sharkUnrealized(accountId) {
+  try {
+    const row = await store.getAccount(accountId);
+    if (!row) return null;
+    const client = new SharkClient(row.api_key, await store.secretOf(row));
+    const wallet = await Promise.race([
+      client.get("/v1/wallet/futures-wallet/details", { marginAsset: "INR" }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000)),
+    ]);
+    const error = sharkError(wallet);
+    if (error) return null;
+    const body = wallet.body || {};
+    const isolated = Number(body.unrealisedPnlIsolated) || 0;
+    const cross = Number(body.unrealisedPnlCross) || 0;
+    return isolated + cross;
+  } catch {
+    return null;
+  }
+}
+
 async function livePositions(row) {
   const client = new SharkClient(row.api_key, await store.secretOf(row));
   const response = await client.get("/v1/positions/OPEN", { sortOrder: "desc", pageSize: "100" });
@@ -116,6 +136,17 @@ async function handle(req, res) {
 
   if (req.method === "GET" && path === "/activity/summary") {
     sendJson(res, 200, { summary: await store.activitySummary() });
+    return;
+  }
+
+  if (req.method === "GET" && path === "/admin/overview") {
+    const overview = await store.adminOverview();
+    await Promise.all(overview.rows.map(async (account) => {
+      account.unrealized = await sharkUnrealized(account.id);
+    }));
+    const marks = overview.rows.map((row) => row.unrealized).filter((value) => value != null);
+    overview.unrealized = marks.length ? marks.reduce((sum, value) => sum + value, 0) : null;
+    sendJson(res, 200, overview);
     return;
   }
 
