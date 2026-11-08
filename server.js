@@ -197,7 +197,8 @@ async function handle(req, res) {
     }
     const book = body.book === "moon" || body.book === "flywheel" ? body.book : "alpha";
     const ownerId = String(body.ownerId || "").trim() || null;
-    const accountId = await store.saveAccount(apiKey, apiSecret, { book, ownerId });
+    const ownerEmail = String(body.ownerEmail || "").trim().toLowerCase() || null;
+    const accountId = await store.saveAccount(apiKey, apiSecret, { book, ownerId, ownerEmail });
     const equity = equityOf(wallet.body);
     await store.recordActivity({
       book,

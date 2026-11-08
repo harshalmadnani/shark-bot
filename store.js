@@ -65,6 +65,7 @@ async function migrate() {
   `);
   await getPool().query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS book TEXT");
   await getPool().query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS owner_id TEXT");
+  await getPool().query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS owner_email TEXT");
   await getPool().query(`
     CREATE TABLE IF NOT EXISTS activity (
       id BIGSERIAL PRIMARY KEY,
@@ -155,6 +156,7 @@ async function adminOverview() {
   const result = await getPool().query(`
     SELECT a.id,
            a.owner_id,
+           a.owner_email,
            COALESCE(NULLIF(a.book, ''), 'alpha') AS book,
            a.halted,
            a.last_run_at,
@@ -173,6 +175,7 @@ async function adminOverview() {
     return {
       id: row.id,
       ownerId: row.owner_id || null,
+      email: row.owner_email || null,
       label: String(row.id).slice(0, 8),
       book: row.book,
       halted: row.halted,
@@ -218,6 +221,7 @@ async function saveAccount(apiKey, apiSecret, meta = {}) {
   const sealed = encrypt(apiSecret);
   const book = meta.book || null;
   const ownerId = meta.ownerId || null;
+  const ownerEmail = meta.ownerEmail || null;
   const existing = await getPool().query("SELECT id FROM accounts WHERE api_key = $1", [apiKey]);
   if (existing.rows[0]) {
     const id = existing.rows[0].id;
@@ -225,17 +229,18 @@ async function saveAccount(apiKey, apiSecret, meta = {}) {
       `UPDATE accounts
        SET secret_ciphertext = $2, secret_iv = $3, secret_tag = $4,
            halted = FALSE, peak_equity = NULL, last_rebalance_day = NULL, last_error = NULL,
-           book = COALESCE($5, book), owner_id = COALESCE($6, owner_id)
+           book = COALESCE($5, book), owner_id = COALESCE($6, owner_id),
+           owner_email = COALESCE($7, owner_email)
        WHERE id = $1`,
-      [id, sealed.ciphertext, sealed.iv, sealed.tag, book, ownerId]
+      [id, sealed.ciphertext, sealed.iv, sealed.tag, book, ownerId, ownerEmail]
     );
     return id;
   }
   const id = crypto.randomUUID();
   await getPool().query(
-    `INSERT INTO accounts (id, api_key, secret_ciphertext, secret_iv, secret_tag, book, owner_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [id, apiKey, sealed.ciphertext, sealed.iv, sealed.tag, book, ownerId]
+    `INSERT INTO accounts (id, api_key, secret_ciphertext, secret_iv, secret_tag, book, owner_id, owner_email)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [id, apiKey, sealed.ciphertext, sealed.iv, sealed.tag, book, ownerId, ownerEmail]
   );
   return id;
 }
