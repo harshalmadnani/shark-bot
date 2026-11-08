@@ -155,7 +155,7 @@ async function adminOverview() {
   const result = await getPool().query(`
     SELECT a.id,
            a.owner_id,
-           COALESCE(NULLIF(a.book, ''), 'shark') AS book,
+           COALESCE(NULLIF(a.book, ''), 'alpha') AS book,
            a.halted,
            a.last_run_at,
            COALESCE(SUM(act.notional_usd) FILTER (WHERE act.kind = 'order' AND act.ok IS TRUE), 0)::float8 AS volume,

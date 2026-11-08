@@ -195,7 +195,7 @@ async function handle(req, res) {
       sendJson(res, 400, { error: walletError });
       return;
     }
-    const book = body.book === "moon" ? "moon" : "alpha";
+    const book = body.book === "moon" || body.book === "flywheel" ? body.book : "alpha";
     const ownerId = String(body.ownerId || "").trim() || null;
     const accountId = await store.saveAccount(apiKey, apiSecret, { book, ownerId });
     const equity = equityOf(wallet.body);
