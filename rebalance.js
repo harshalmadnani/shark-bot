@@ -126,6 +126,10 @@ async function setLeverage(client, symbol, leverage, state) {
   return sharkError(updated);
 }
 
+function leverageLocked(error) {
+  return typeof error === "string" && /cannot be updated with open position/i.test(error);
+}
+
 function track(row, fields) {
   return store.recordActivity({
     book: row?.book || null,
@@ -266,15 +270,16 @@ async function rebalanceAccount(id) {
       const symbolLeverage = leverageForGross(grossOf(book.weights), maxLeverage);
       try {
         const preferenceError = await setLeverage(client, symbol, symbolLeverage, marginState);
-        if (preferenceError && !closing) {
+        const locked = leverageLocked(preferenceError);
+        if (preferenceError && !locked && !closing) {
           errors.push(`${symbol} leverage (${marginState.mode}): ${preferenceError}`);
           await track(row, { ...orderFields, ok: false, detail: preferenceError });
           await sleep(150);
           continue;
         }
-        if (preferenceError) errors.push(`${symbol} leverage (${marginState.mode}): ${preferenceError}`);
+        if (preferenceError && !locked) errors.push(`${symbol} leverage (${marginState.mode}): ${preferenceError}`);
         await place(client, symbol, delta, precision);
-        await track(row, { ...orderFields, ok: true, detail: preferenceError || null });
+        await track(row, { ...orderFields, ok: true, detail: locked ? null : preferenceError || null });
       } catch (error) {
         errors.push(error.message);
         await track(row, { ...orderFields, ok: false, detail: error.message });
