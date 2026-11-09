@@ -250,6 +250,19 @@ async function getAccount(id) {
   return result.rows[0] || null;
 }
 
+/** The account this login already connected for one book. Empty when there is none. */
+async function findOwned(ownerId, email, book) {
+  const result = await getPool().query(
+    `SELECT id FROM accounts
+     WHERE COALESCE(NULLIF(book, ''), 'alpha') = $3
+       AND (owner_id = $1 OR ($2 <> '' AND lower(owner_email) = lower($2)))
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [ownerId || "", email || "", book || "alpha"]
+  );
+  return result.rows[0]?.id || "";
+}
+
 async function secretOf(row) {
   return decrypt(row);
 }
@@ -294,6 +307,7 @@ module.exports = {
   migrate,
   saveAccount,
   getAccount,
+  findOwned,
   secretOf,
   listTradable,
   markRun,

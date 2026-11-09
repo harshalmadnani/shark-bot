@@ -176,6 +176,25 @@ async function handle(req, res) {
     return;
   }
 
+  if (req.method === "GET" && path === "/accounts/owned") {
+    const ownerId = String(url.searchParams.get("ownerId") || "").trim();
+    const email = String(url.searchParams.get("email") || "").trim().toLowerCase();
+    const book = url.searchParams.get("book") === "moon" || url.searchParams.get("book") === "flywheel"
+      ? url.searchParams.get("book")
+      : "alpha";
+    if (!ownerId && !email) {
+      sendJson(res, 400, { error: "Missing owner" });
+      return;
+    }
+    const accountId = await store.findOwned(ownerId, email, book);
+    if (!accountId) {
+      sendJson(res, 404, { error: "Account not found" });
+      return;
+    }
+    sendJson(res, 200, { accountId });
+    return;
+  }
+
   if (req.method === "POST" && path === "/accounts") {
     if (limited(clientIp(req))) {
       sendJson(res, 429, { error: "Too many attempts. Try again later." });
