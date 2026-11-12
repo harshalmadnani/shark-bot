@@ -84,6 +84,8 @@ function exchange({ wallet = { marginBalance: "100000" }, positions = [] } = {})
 function account(overrides = {}) {
   const db = { row: { id: ID, book: "alpha", owner_id: "did:privy:x", api_key: "FAKEKEYFAKEKEYFAKE", peak_equity: 100000, last_rebalance_day: null, halted: false, ...overrides } };
   store.getAccount = async (id) => (db.row && db.row.id === id ? { ...db.row } : null);
+  store.claimRun = async (id) => (db.row && db.row.id === id ? { ...db.row } : null);
+  store.releaseRun = async () => {};
   store.secretOf = async () => "FAKESECRETFAKESECRET";
   store.recordActivity = async () => {};
   store.markRun = async (id, m) => Object.assign(db.row, { peak_equity: m.peakEquity, last_rebalance_day: m.lastRebalanceDay, halted: m.halted, last_error: m.lastError });

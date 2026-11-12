@@ -215,16 +215,24 @@ async function flatten(client, info, row) {
   return orders.filter(Boolean);
 }
 
-async function rebalanceAccount(id) {
+async function rebalanceAccount(id, options = {}) {
   if (running.has(id)) {
     await store.recordActivity({ accountId: id, kind: "skip", ok: false, detail: "already running" });
     return { skipped: true };
   }
   running.add(id);
   const today = utcDay();
+  let leased = false;
   try {
-    const row = await store.getAccount(id);
-    if (!row) return { missing: true };
+    const row = await store.claimRun(id);
+    if (!row) {
+      if (!(await store.getAccount(id))) return { missing: true };
+      await store.recordActivity({ accountId: id, kind: "skip", ok: false, detail: "running elsewhere" });
+      return { skipped: true, locked: true };
+    }
+    leased = true;
+    // The due list was read before this lease was taken; another copy may have finished the account since.
+    if (options.due && row.last_rebalance_day === today) return { skipped: true, done: true };
     await track(row, { kind: "rebalance", ok: true, detail: "started" });
     const client = new SharkClient(row.api_key, await store.secretOf(row));
     const wallet = await client.get("/v1/wallet/futures-wallet/details", { marginAsset: "INR" });
@@ -393,6 +401,7 @@ async function rebalanceAccount(id) {
     return { error: error.message };
   } finally {
     running.delete(id);
+    if (leased) await store.releaseRun(id).catch(() => {});
   }
 }
 
@@ -405,16 +414,45 @@ async function flattenAccount(id) {
   return { flattened: true };
 }
 
+/**
+ * Disconnect: wait for the account's run lease (a rebalance in progress finishes its orders first), close the
+ * book's coins unless told not to, and delete the account while still holding the lease, so no other copy of
+ * the bot can reopen positions in between.
+ */
+async function disconnectAccount(id, { close = true, waitMs = 25000 } = {}) {
+  const deadline = Date.now() + waitMs;
+  let row = await store.claimRun(id);
+  while (!row && Date.now() < deadline) {
+    if (!(await store.getAccount(id))) return { missing: true };
+    await sleep(1000);
+    row = await store.claimRun(id);
+  }
+  if (!row) {
+    if (!(await store.getAccount(id))) return { missing: true };
+    const busy = new Error("A rebalance is running on this account. Try again in a minute.");
+    busy.status = 409;
+    throw busy;
+  }
+  try {
+    if (close) await flattenAccount(id);
+    await store.deleteAccount(id);
+    return { disconnected: true };
+  } catch (error) {
+    await store.releaseRun(id).catch(() => {});
+    throw error;
+  }
+}
+
 async function runDue() {
   const today = utcDay();
   const accounts = await store.listTradable();
   const due = accounts.filter((account) => account.last_rebalance_day !== today);
   console.log(`rebalance due ${due.length}`);
-  for (const account of due) await rebalanceAccount(account.id);
+  for (const account of due) await rebalanceAccount(account.id, { due: true });
 }
 
 function isRunning(id) {
   return running.has(id);
 }
 
-module.exports = { rebalanceAccount, flattenAccount, runDue, isRunning, utcDay, equityOf, BOOK_SYMBOLS, setLeverage, leverageLocked };
+module.exports = { rebalanceAccount, flattenAccount, runDue, isRunning, utcDay, equityOf, BOOK_SYMBOLS, setLeverage, leverageLocked, disconnectAccount };

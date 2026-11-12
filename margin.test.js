@@ -74,6 +74,8 @@ function exchange({ positions = [], leverageAlsoLocked = false, otherError = nul
 function account() {
   const row = { id: ID, book: "moon", owner_id: "did:privy:x", api_key: "FAKEKEYFAKEKEYFAKE", peak_equity: 100000, last_rebalance_day: null, halted: false };
   store.getAccount = async () => ({ ...row });
+  store.claimRun = async () => ({ ...row });
+  store.releaseRun = async () => {};
   store.secretOf = async () => "FAKESECRETFAKESECRET";
   store.recordActivity = async () => {};
   store.markRun = async (id, m) => Object.assign(row, { last_rebalance_day: m.lastRebalanceDay, last_error: m.lastError });

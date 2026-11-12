@@ -1,0 +1,36 @@
+// The run lease against a real Postgres. Needs TEST_DATABASE_URL pointed at a throwaway database.
+const test = require("node:test");
+const assert = require("node:assert/strict");
+
+const URL = process.env.TEST_DATABASE_URL;
+test("the run lease is exclusive, expires, and is released only by its holder", { skip: !URL }, async () => {
+  process.env.DATABASE_URL = URL;
+  process.env.KEY_ENCRYPTION_SECRET ||= "test-secret-test-secret-test-secret";
+  const store = require("./store");
+  await store.migrate();
+  await store.migrate();
+  const pool = store.getPool();
+  const query = (sql, params) => pool.query(sql, params);
+  const id = "11111111-2222-3333-4444-555555555555";
+  await query("DELETE FROM accounts WHERE id = $1", [id]);
+  await query(
+    "INSERT INTO accounts (id, api_key, secret_ciphertext, secret_iv, secret_tag) VALUES ($1, 'k-lease', 'c', 'i', 't')",
+    [id]
+  );
+
+  const first = await store.claimRun(id);
+  assert.equal(first.id, id, "the claim returns the fresh row");
+  assert.equal(await store.claimRun(id), null, "a second claim fails while the lease is held");
+
+  await query("UPDATE accounts SET run_lock_owner = 'other-instance' WHERE id = $1", [id]);
+  await store.releaseRun(id);
+  assert.equal(await store.claimRun(id), null, "only the holder can release it");
+
+  await query("UPDATE accounts SET run_lock_until = NOW() - interval '1 second' WHERE id = $1", [id]);
+  assert.ok(await store.claimRun(id), "an expired lease can be taken");
+  await store.releaseRun(id);
+  assert.ok(await store.claimRun(id), "a released lease can be taken");
+  assert.equal(await store.claimRun("99999999-0000-0000-0000-000000000000"), null, "no account, no lease");
+  await query("DELETE FROM accounts WHERE id = $1", [id]);
+  await pool.end();
+});
