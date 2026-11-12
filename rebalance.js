@@ -306,13 +306,20 @@ async function rebalanceAccount(id) {
     }
 
     for (const leg of reductions) {
-      const { symbol, delta, precision, minQty, price } = leg;
+      const { symbol, delta, precision, minQty, price, contract } = leg;
       const quantity = roundQty(Math.abs(delta), precision);
       const side = delta > 0 ? "BUY" : "SELL";
       const notionalUsdt = quantity * (price || 0);
       const orderFields = { kind: "order", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity };
       if (quantity < minQty) {
         await track(row, { kind: "skip", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity, ok: false, detail: "close below min quantity" });
+        continue;
+      }
+      // Shark rejects any order worth less than the contract's minimum notional ("Order quantity is out of
+      // range"), reduce-only ones included. Skip it like an increase of that size; what is left over is less
+      // than one minimum order. Sending it made the run end with errors and retry every 15 minutes.
+      if (contract && notionalUsdt < contract.minNotional) {
+        await track(row, { kind: "skip", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity, ok: false, detail: "reduction below min notional" });
         continue;
       }
       try {
