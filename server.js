@@ -259,7 +259,9 @@ async function handle(req, res) {
       return;
     }
     try {
-      await flattenAccount(row.id);
+      // Disconnect closes the bot's own coins (the website's Disconnect says "Closing positions").
+      // ?close=false disconnects without closing. Positions in other coins are never touched.
+      if (url.searchParams.get("close") !== "false") await flattenAccount(row.id);
     } catch (error) {
       await store.recordActivity({
         book: row.book,
