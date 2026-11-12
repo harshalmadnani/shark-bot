@@ -133,8 +133,13 @@ async function setLeverage(client, symbol, leverage, state) {
     });
     const preferenceError = sharkError(preference);
     if (!preferenceError) return null;
-    if (!/cross margin is not enabled/i.test(preferenceError)) return preferenceError;
-    state.mode = "LEVERAGE_ONLY";
+    if (/cross margin is not enabled/i.test(preferenceError)) {
+      state.mode = "LEVERAGE_ONLY";
+    } else if (!leverageLocked(preferenceError)) {
+      return preferenceError;
+    }
+    // Shark will not change the margin mode while this coin has an open position. Set the leverage
+    // alone for this coin; the account keeps its margin mode for the others.
   }
   const updated = await client.post("/v1/exchange/update/leverage", {
     leverage,
@@ -143,8 +148,14 @@ async function setLeverage(client, symbol, leverage, state) {
   return sharkError(updated);
 }
 
+/**
+ * Shark refuses some setting changes while the coin has an open position. Its message has been both
+ * "cannot be updated with open position" and "Margin mode can't be updated with an open position"; the
+ * second did not match before, so every order on a held coin was skipped and the day was retried every
+ * 15 minutes (14,890 failures across 40 accounts on 2026-11-12).
+ */
 function leverageLocked(error) {
-  return typeof error === "string" && /cannot be updated with open position/i.test(error);
+  return typeof error === "string" && /(cannot|can't|can not) be updated with (an )?open position/i.test(error);
 }
 
 function track(row, fields) {
@@ -399,4 +410,4 @@ function isRunning(id) {
   return running.has(id);
 }
 
-module.exports = { rebalanceAccount, flattenAccount, runDue, isRunning, utcDay, equityOf, BOOK_SYMBOLS };
+module.exports = { rebalanceAccount, flattenAccount, runDue, isRunning, utcDay, equityOf, BOOK_SYMBOLS, setLeverage, leverageLocked };
