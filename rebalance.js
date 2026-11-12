@@ -4,6 +4,9 @@ const store = require("./store");
 
 const running = new Set();
 
+/** The only contracts the bot trades or closes. Anything else on the account is the user's own. */
+const BOOK_SYMBOLS = new Set(UNIVERSE.map((coin) => `${coin}USDT`));
+
 function utcDay(date = new Date()) {
   return date.toISOString().slice(0, 10);
 }
@@ -77,13 +80,27 @@ async function dailyHistory(coin) {
   return { coin, bars };
 }
 
+/** A number only when the field really holds one: null, "", missing or non-numeric give NaN, never 0. */
+function reported(value) {
+  if (value === null || value === undefined || value === "" || typeof value === "boolean") return NaN;
+  return Number(value);
+}
+
+/**
+ * Futures equity in INR, or null when the wallet reply does not carry a usable balance.
+ * A missing, null or empty field must never read as zero: zero equity looks like a 100% loss
+ * and would trip the drawdown stop, closing the whole book.
+ */
 function equityOf(wallet) {
-  const margin = Number(wallet && wallet.marginBalance);
-  if (Number.isFinite(margin)) return margin;
-  const balance = Number(wallet && wallet.walletBalance) || 0;
-  const pnl = Number(wallet && wallet.unrealisedPnlCross) || 0;
-  const isolated = Number(wallet && wallet.unrealisedPnlIsolated) || 0;
-  return balance + pnl + isolated;
+  if (!wallet || typeof wallet !== "object") return null;
+  const margin = reported(wallet.marginBalance);
+  if (Number.isFinite(margin) && margin > 0) return margin;
+  const balance = reported(wallet.walletBalance);
+  if (!Number.isFinite(balance) || balance <= 0) return null;
+  const pnl = Number.isFinite(reported(wallet.unrealisedPnlCross)) ? reported(wallet.unrealisedPnlCross) : 0;
+  const isolated = Number.isFinite(reported(wallet.unrealisedPnlIsolated)) ? reported(wallet.unrealisedPnlIsolated) : 0;
+  const equity = balance + pnl + isolated;
+  return Number.isFinite(equity) && equity > 0 ? equity : null;
 }
 
 function signedQty(position) {
@@ -140,7 +157,8 @@ function track(row, fields) {
   });
 }
 
-async function place(client, symbol, delta, precision) {
+async function place(client, symbol, delta, precision, reduceOnly = false) {
+  if (!BOOK_SYMBOLS.has(symbol)) throw new Error(`${symbol}: not a book coin, refusing to trade it`);
   const quantity = roundQty(Math.abs(delta), precision);
   if (!(quantity > 0)) return null;
   const response = await client.post("/v1/order/place-order", {
@@ -148,7 +166,7 @@ async function place(client, symbol, delta, precision) {
     quantity,
     side: delta > 0 ? "BUY" : "SELL",
     symbol,
-    reduceOnly: false,
+    reduceOnly,
     marginAsset: "INR",
     type: "MARKET",
   });
@@ -157,26 +175,32 @@ async function place(client, symbol, delta, precision) {
   return response.body;
 }
 
+/**
+ * Closes the book's own coins, reduce-only. Positions in any other contract belong to the user
+ * and are left alone. Every coin is attempted; failures are collected and thrown together.
+ */
 async function flatten(client, info, row) {
   const positions = await openPositions(client);
   const orders = [];
+  const failures = [];
   for (const [symbol, qty] of positions) {
-    if (qty === 0) continue;
+    if (qty === 0 || !BOOK_SYMBOLS.has(symbol)) continue;
     const contract = info.contracts.get(symbol);
     const precision = contract ? contract.quantityPrecision : 0;
     const minQty = contract ? contract.minQty : 0;
     const quantity = roundQty(Math.abs(qty), precision);
-    if (quantity < minQty) continue;
+    if (!(quantity > 0) || quantity < minQty) continue;
     const side = qty > 0 ? "SELL" : "BUY";
     try {
-      orders.push(await place(client, symbol, -qty, precision));
+      orders.push(await place(client, symbol, -qty, precision, true));
       await track(row, { kind: "order", symbol, side, quantity, ok: true, detail: "flatten" });
     } catch (error) {
+      failures.push(error.message);
       await track(row, { kind: "order", symbol, side, quantity, ok: false, detail: error.message });
-      throw error;
     }
     await sleep(150);
   }
+  if (failures.length) throw new Error(`Some positions did not close: ${failures.join("; ")}`);
   return orders.filter(Boolean);
 }
 
@@ -196,6 +220,7 @@ async function rebalanceAccount(id) {
     const walletError = sharkError(wallet);
     if (walletError) throw new Error(walletError);
     const equity = equityOf(wallet.body);
+    if (equity == null) throw new Error("Shark did not report a readable futures wallet balance");
     const peak = row.peak_equity == null ? equity : Math.max(row.peak_equity, equity);
     const info = await exchangeInfo();
 
@@ -226,11 +251,13 @@ async function rebalanceAccount(id) {
     const leverage = leverageForGross(grossOf(book.weights), 100);
     const errors = [];
     const marginState = { mode: "CROSS" };
-    const symbols = new Set([...positions.keys()]);
-    for (const coin of UNIVERSE) symbols.add(`${coin}USDT`);
 
-    for (const symbol of symbols) {
-      const coin = symbol.endsWith("USDT") ? symbol.slice(0, -4) : symbol;
+    // Plan every book coin first, as reduce-only reductions and opening increases, so that all
+    // reductions go out before any increase. Coins outside the book are never looked at.
+    const reductions = [];
+    const increases = [];
+    for (const symbol of BOOK_SYMBOLS) {
+      const coin = symbol.slice(0, -4);
       const contract = info.contracts.get(symbol);
       const price = prices.get(coin);
       const current = positions.get(symbol) || 0;
@@ -241,45 +268,80 @@ async function rebalanceAccount(id) {
       }
       const precision = contract ? contract.quantityPrecision : 0;
       const minQty = contract ? contract.minQty : 0;
-      const delta = roundQty(target, precision) - roundQty(current, precision);
+      const roundedTarget = roundQty(target, precision);
+      const roundedCurrent = roundQty(current, precision);
+      const delta = roundedTarget - roundedCurrent;
       const quantity = roundQty(Math.abs(delta), precision);
       if (!(quantity > 0)) continue;
       const side = delta > 0 ? "BUY" : "SELL";
-      const closing = roundQty(target, precision) === 0;
+      const closing = roundedTarget === 0;
       const notionalUsdt = quantity * (price || 0);
       const notionalInr = notionalUsdt * info.rate;
-      const orderFields = { kind: "order", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity };
-      if (!closing && quantity < minQty) {
-        await track(row, { kind: "skip", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity, ok: false, detail: "below min quantity" });
-        continue;
-      }
+      const base = { symbol, contract, price, precision, minQty, equity };
       if (!closing && notionalInr <= equity * RULES.rebalanceBand) {
         await track(row, { kind: "skip", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity, ok: false, detail: "inside rebalance band" });
         continue;
       }
-      if (!closing && contract && notionalUsdt < contract.minNotional) {
-        await track(row, { kind: "skip", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity, ok: false, detail: "below min notional" });
-        continue;
+
+      const flips = roundedCurrent !== 0 && !closing && Math.sign(roundedCurrent) !== Math.sign(roundedTarget);
+      const shrinking = roundedCurrent !== 0 && !closing && !flips && Math.abs(roundedTarget) < Math.abs(roundedCurrent);
+      if (roundedCurrent !== 0 && (closing || flips || shrinking)) {
+        // Close (all of it for a close or a flip, the difference when shrinking), reduce-only.
+        const reduceDelta = closing || flips ? -roundedCurrent : delta;
+        reductions.push({ ...base, delta: reduceDelta, closing: closing || flips });
       }
-      if (closing && quantity < minQty) {
+      const opening = closing || shrinking ? 0 : flips ? roundedTarget : delta;
+      if (opening !== 0) increases.push({ ...base, delta: opening });
+    }
+
+    for (const leg of reductions) {
+      const { symbol, delta, precision, minQty, price } = leg;
+      const quantity = roundQty(Math.abs(delta), precision);
+      const side = delta > 0 ? "BUY" : "SELL";
+      const notionalUsdt = quantity * (price || 0);
+      const orderFields = { kind: "order", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity };
+      if (quantity < minQty) {
         await track(row, { kind: "skip", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity, ok: false, detail: "close below min quantity" });
         continue;
       }
+      try {
+        // A reduction needs no leverage change, so the user's leverage settings are not touched for it.
+        await place(client, symbol, delta, precision, true);
+        await track(row, { ...orderFields, ok: true, detail: "reduce-only" });
+      } catch (error) {
+        errors.push(error.message);
+        await track(row, { ...orderFields, ok: false, detail: error.message });
+      }
+      await sleep(150);
+    }
 
+    for (const leg of increases) {
+      const { symbol, delta, precision, minQty, price, contract } = leg;
+      const quantity = roundQty(Math.abs(delta), precision);
+      const side = delta > 0 ? "BUY" : "SELL";
+      const notionalUsdt = quantity * (price || 0);
+      const orderFields = { kind: "order", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity };
+      if (quantity < minQty) {
+        await track(row, { kind: "skip", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity, ok: false, detail: "below min quantity" });
+        continue;
+      }
+      if (contract && notionalUsdt < contract.minNotional) {
+        await track(row, { kind: "skip", symbol, side, quantity, price, notionalUsd: notionalUsdt, equity, ok: false, detail: "below min notional" });
+        continue;
+      }
       const maxLeverage = contract ? contract.maxLeverage : leverage;
       const symbolLeverage = leverageForGross(grossOf(book.weights), maxLeverage);
       try {
         const preferenceError = await setLeverage(client, symbol, symbolLeverage, marginState);
         const locked = leverageLocked(preferenceError);
-        if (preferenceError && !locked && !closing) {
+        if (preferenceError && !locked) {
           errors.push(`${symbol} leverage (${marginState.mode}): ${preferenceError}`);
           await track(row, { ...orderFields, ok: false, detail: preferenceError });
           await sleep(150);
           continue;
         }
-        if (preferenceError && !locked) errors.push(`${symbol} leverage (${marginState.mode}): ${preferenceError}`);
-        await place(client, symbol, delta, precision);
-        await track(row, { ...orderFields, ok: true, detail: locked ? null : preferenceError || null });
+        await place(client, symbol, delta, precision, false);
+        await track(row, { ...orderFields, ok: true, detail: null });
       } catch (error) {
         errors.push(error.message);
         await track(row, { ...orderFields, ok: false, detail: error.message });
@@ -337,4 +399,4 @@ function isRunning(id) {
   return running.has(id);
 }
 
-module.exports = { rebalanceAccount, flattenAccount, runDue, isRunning, utcDay, equityOf };
+module.exports = { rebalanceAccount, flattenAccount, runDue, isRunning, utcDay, equityOf, BOOK_SYMBOLS };
