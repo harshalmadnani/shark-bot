@@ -2,7 +2,7 @@ const crypto = require("crypto");
 const http = require("http");
 const store = require("./store");
 const { SharkClient, sharkError } = require("./shark");
-const { rebalanceAccount, flattenAccount, runDue, isRunning, equityOf } = require("./rebalance");
+const { rebalanceAccount, disconnectAccount, runDue, isRunning, equityOf } = require("./rebalance");
 const { loadPortfolio, quotes } = require("./portfolio");
 
 const port = Number(process.env.PORT) || 3000;
@@ -261,7 +261,8 @@ async function handle(req, res) {
     try {
       // Disconnect closes the bot's own coins (the website's Disconnect says "Closing positions").
       // ?close=false disconnects without closing. Positions in other coins are never touched.
-      if (url.searchParams.get("close") !== "false") await flattenAccount(row.id);
+      // It waits for a rebalance in progress and holds the run lease until the account is deleted.
+      await disconnectAccount(row.id, { close: url.searchParams.get("close") !== "false" });
     } catch (error) {
       await store.recordActivity({
         book: row.book,
@@ -271,7 +272,7 @@ async function handle(req, res) {
         ok: false,
         detail: error.message,
       });
-      sendJson(res, 502, { error: error.message });
+      sendJson(res, error.status === 409 ? 409 : 502, { error: error.message });
       return;
     }
     await store.recordActivity({
@@ -281,7 +282,6 @@ async function handle(req, res) {
       kind: "disconnect",
       ok: true,
     });
-    await store.deleteAccount(row.id);
     sendJson(res, 200, { disconnected: true });
     return;
   }

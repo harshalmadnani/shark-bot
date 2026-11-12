@@ -1,3 +1,4 @@
+const os = require("os");
 const crypto = require("crypto");
 const { Pool } = require("pg");
 
@@ -66,6 +67,10 @@ async function migrate() {
   await getPool().query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS book TEXT");
   await getPool().query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS owner_id TEXT");
   await getPool().query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS owner_email TEXT");
+  // Per-account run lease, so two running copies of the bot (a Render deploy overlaps old and new) never
+  // trade or close the same account at once.
+  await getPool().query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS run_lock_until TIMESTAMPTZ");
+  await getPool().query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS run_lock_owner TEXT");
   await getPool().query(`
     CREATE TABLE IF NOT EXISTS activity (
       id BIGSERIAL PRIMARY KEY,
@@ -303,8 +308,36 @@ function publicAccount(row) {
   };
 }
 
+/** This process. A lease is only ever released by the process that took it. */
+const LOCK_OWNER = `${os.hostname()}-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+
+/**
+ * Take the account's run lease if no one holds it (or it has expired). Returns the account row read in the
+ * same statement, or null when the lease is held elsewhere or the account does not exist.
+ */
+async function claimRun(id, seconds = 600) {
+  const result = await getPool().query(
+    `UPDATE accounts
+        SET run_lock_until = NOW() + make_interval(secs => $3), run_lock_owner = $2
+      WHERE id = $1 AND (run_lock_until IS NULL OR run_lock_until < NOW())
+      RETURNING *`,
+    [id, LOCK_OWNER, seconds]
+  );
+  return result.rows[0] || null;
+}
+
+async function releaseRun(id) {
+  await getPool().query(
+    "UPDATE accounts SET run_lock_until = NULL, run_lock_owner = NULL WHERE id = $1 AND run_lock_owner = $2",
+    [id, LOCK_OWNER]
+  );
+}
+
 module.exports = {
+  getPool,
   migrate,
+  claimRun,
+  releaseRun,
   saveAccount,
   getAccount,
   findOwned,
