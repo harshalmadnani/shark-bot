@@ -32,7 +32,7 @@ function exchange(positions = []) {
   function reply(path, body) {
     const p = path.split("?")[0];
     const params = body ? JSON.parse(body) : {};
-    if (p === "/v1/wallet/futures-wallet/details") return [200, { marginBalance: String(EQUITY) }];
+    if (p === "/v1/wallet/futures-wallet/details") return [200, { walletBalance: String(EQUITY), marginBalance: String(EQUITY) }];
     if (p === "/v1/exchange/exchangeInfo") {
       return [200, {
         contracts: UNIVERSE.map((c) => ({ name: `${c}USDT`, quantityPrecision: 3, maxLeverage: 20,

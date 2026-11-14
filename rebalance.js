@@ -86,20 +86,41 @@ function reported(value) {
   return Number(value);
 }
 
+/** A reported unrealised-PnL field, or 0 when it is missing, null, empty or non-numeric. */
+function pnlField(value) {
+  const n = reported(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
 /**
- * Futures equity in INR, or null when the wallet reply does not carry a usable balance.
- * A missing, null or empty field must never read as zero: zero equity looks like a 100% loss
- * and would trip the drawdown stop, closing the whole book.
+ * Unrealised PnL in INR across cross and isolated positions (each missing field counts as 0),
+ * or null when there is no wallet object. Every caller uses this instead of re-deriving the sum.
+ */
+function unrealisedOf(wallet) {
+  if (!wallet || typeof wallet !== "object") return null;
+  return pnlField(wallet.unrealisedPnlCross) + pnlField(wallet.unrealisedPnlIsolated);
+}
+
+/**
+ * Futures equity in INR: walletBalance + unrealisedPnlCross + unrealisedPnlIsolated,
+ * or null when the wallet reply does not carry a usable balance.
+ *
+ * marginBalance is deliberately NOT used. On Shark it is free cash: walletBalance minus the
+ * margin locked in open positions, with no unrealised PnL (live: 4859.96 - 1428.35 = 3431.61).
+ * Using it made equity drop by all locked margin whenever positions were open.
+ *
+ * Shark's walletBalance does NOT include unrealised PnL (marginBalance = walletBalance - locked,
+ * with no PnL term, and portfolio.js reports the two separately), so adding unrealisedOf() here
+ * counts PnL exactly once. Do not add unrealised PnL to this value again anywhere else.
+ *
+ * A missing, null or empty walletBalance must never read as zero: zero equity looks like a 100%
+ * loss and would trip the drawdown stop, closing the whole book. So it returns null instead.
  */
 function equityOf(wallet) {
   if (!wallet || typeof wallet !== "object") return null;
-  const margin = reported(wallet.marginBalance);
-  if (Number.isFinite(margin) && margin > 0) return margin;
   const balance = reported(wallet.walletBalance);
   if (!Number.isFinite(balance) || balance <= 0) return null;
-  const pnl = Number.isFinite(reported(wallet.unrealisedPnlCross)) ? reported(wallet.unrealisedPnlCross) : 0;
-  const isolated = Number.isFinite(reported(wallet.unrealisedPnlIsolated)) ? reported(wallet.unrealisedPnlIsolated) : 0;
-  const equity = balance + pnl + isolated;
+  const equity = balance + unrealisedOf(wallet);
   return Number.isFinite(equity) && equity > 0 ? equity : null;
 }
 
@@ -426,4 +447,4 @@ function isRunning(id) {
   return running.has(id);
 }
 
-module.exports = { rebalanceAccount, flattenAccount, runDue, isRunning, utcDay, equityOf, BOOK_SYMBOLS, setLeverage, leverageLocked };
+module.exports = { rebalanceAccount, flattenAccount, runDue, isRunning, utcDay, equityOf, unrealisedOf, BOOK_SYMBOLS, setLeverage, leverageLocked };

@@ -161,7 +161,11 @@ async function adminOverview() {
            a.halted,
            a.last_run_at,
            COALESCE(SUM(act.notional_usd) FILTER (WHERE act.kind = 'order' AND act.ok IS TRUE), 0)::float8 AS volume,
-           (SELECT equity FROM activity WHERE account_id = a.id AND equity IS NOT NULL ORDER BY at ASC LIMIT 1) AS start_equity,
+           -- Start = the latest 'baseline_reset' row (scripts/reset-equity-baseline.js), else the first equity row.
+           COALESCE(
+             (SELECT equity FROM activity WHERE account_id = a.id AND kind = 'baseline_reset' AND equity IS NOT NULL ORDER BY at DESC LIMIT 1),
+             (SELECT equity FROM activity WHERE account_id = a.id AND equity IS NOT NULL ORDER BY at ASC LIMIT 1)
+           ) AS start_equity,
            (SELECT equity FROM activity WHERE account_id = a.id AND equity IS NOT NULL ORDER BY at DESC LIMIT 1) AS aum
     FROM accounts a
     LEFT JOIN activity act ON act.account_id = a.id
@@ -183,6 +187,9 @@ async function adminOverview() {
       volume,
       startEquity,
       aum,
+      // PnL = change in recorded equity (walletBalance + unrealised PnL) since connect (or the
+      // latest baseline_reset). Rows recorded before this fix used marginBalance and are
+      // understated whenever positions were open.
       pnl: startEquity != null && aum != null ? aum - startEquity : null,
       fees: 0,
       unrealized: null,

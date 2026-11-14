@@ -2,7 +2,7 @@ const crypto = require("crypto");
 const http = require("http");
 const store = require("./store");
 const { SharkClient, sharkError, disconnectOnFlattenError } = require("./shark");
-const { rebalanceAccount, flattenAccount, runDue, isRunning, equityOf } = require("./rebalance");
+const { rebalanceAccount, flattenAccount, runDue, isRunning, equityOf, unrealisedOf } = require("./rebalance");
 const { loadPortfolio, quotes } = require("./portfolio");
 
 const port = Number(process.env.PORT) || 3000;
@@ -80,10 +80,7 @@ async function sharkUnrealized(accountId) {
     ]);
     const error = sharkError(wallet);
     if (error) return null;
-    const body = wallet.body || {};
-    const isolated = Number(body.unrealisedPnlIsolated) || 0;
-    const cross = Number(body.unrealisedPnlCross) || 0;
-    return isolated + cross;
+    return unrealisedOf(wallet.body || {});
   } catch {
     return null;
   }
@@ -141,6 +138,8 @@ async function handle(req, res) {
 
   if (req.method === "GET" && path === "/admin/overview") {
     const overview = await store.adminOverview();
+    // `unrealized` is informational only. Do NOT add it to pnl: recorded equity is
+    // walletBalance + unrealised PnL (equityOf), so pnl already includes it.
     await Promise.all(overview.rows.map(async (account) => {
       account.unrealized = await sharkUnrealized(account.id);
     }));
