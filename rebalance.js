@@ -112,7 +112,11 @@ function signedQty(position) {
 
 async function openPositions(client) {
   const response = await client.get("/v1/positions/OPEN", { sortOrder: "desc", pageSize: "100" });
-  if (response.status >= 400) throw new Error(sharkError(response) || "Could not load positions");
+  if (response.status >= 400) {
+    const error = new Error(sharkError(response) || "Could not load positions");
+    error.status = response.status;
+    throw error;
+  }
   if (!Array.isArray(response.body)) throw new Error("Unexpected positions response");
   const rows = response.body;
   const qty = new Map();
@@ -182,7 +186,11 @@ async function place(client, symbol, delta, precision, reduceOnly = false) {
     type: "MARKET",
   });
   const error = sharkError(response);
-  if (error) throw new Error(`${symbol}: ${error}`);
+  if (error) {
+    const failure = new Error(`${symbol}: ${error}`);
+    failure.status = response.status;
+    throw failure;
+  }
   return response.body;
 }
 
@@ -382,6 +390,7 @@ async function rebalanceAccount(id) {
     });
     return { date: book.date, weights: book.weights, equity, errors };
   } catch (error) {
+    console.error(`rebalance ${id} failed: ${error.message}`);
     const saved = await store.getAccount(id).catch(() => null);
     await store.markRun(id, {
       peakEquity: saved?.peak_equity ?? null,

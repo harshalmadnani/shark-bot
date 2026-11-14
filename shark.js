@@ -75,4 +75,28 @@ function sharkError(response) {
   return `Shark returned ${response.status}`;
 }
 
-module.exports = { SharkClient, sharkError, requestJson };
+// Shark rejecting the account itself (unknown user, bad/revoked API key, bad signature). The bot
+// cannot trade such an account at all, unlike network errors or order rejections.
+const CREDENTIAL_PATTERNS = [
+  /unable to find user/,
+  /invalid api[ -]?key/,
+  /api[ -]?key not found/,
+  /invalid signature/,
+  /unauthori[sz]ed/,
+  /forbidden/,
+];
+
+function isCredentialError(message, status) {
+  if (Number(status) === 401 || Number(status) === 403) return true;
+  if (message == null) return false;
+  const text = String(message).toLowerCase();
+  return CREDENTIAL_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+// Disconnect may delete an account without closing its positions only when Shark rejects the
+// credentials: nothing can be closed with them anyway. Any other flatten error keeps the account.
+function disconnectOnFlattenError(error) {
+  return isCredentialError(error?.message, error?.status);
+}
+
+module.exports = { SharkClient, sharkError, requestJson, isCredentialError, disconnectOnFlattenError };

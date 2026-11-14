@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const http = require("http");
 const store = require("./store");
-const { SharkClient, sharkError } = require("./shark");
+const { SharkClient, sharkError, disconnectOnFlattenError } = require("./shark");
 const { rebalanceAccount, flattenAccount, runDue, isRunning, equityOf } = require("./rebalance");
 const { loadPortfolio, quotes } = require("./portfolio");
 
@@ -271,6 +271,18 @@ async function handle(req, res) {
         ok: false,
         detail: error.message,
       });
+      if (disconnectOnFlattenError(error)) {
+        // Shark rejects this account's credentials, so the bot can neither trade nor close it.
+        // Delete it anyway so the user is not stuck; they must reconnect with a valid API key.
+        await store.deleteAccount(row.id);
+        console.error(`disconnect ${row.id} deleted without closing: ${error.message}`);
+        sendJson(res, 200, {
+          disconnected: true,
+          closed: false,
+          warning: `Positions could not be closed because Shark rejected the account credentials: ${error.message}`,
+        });
+        return;
+      }
       sendJson(res, 502, { error: error.message });
       return;
     }
