@@ -29,7 +29,7 @@ function exchange({ positions = [], leverageAlsoLocked = false, otherError = nul
   function reply(path, body) {
     const p = path.split("?")[0];
     const params = body ? JSON.parse(body) : {};
-    if (p === "/v1/wallet/futures-wallet/details") return [200, { marginBalance: "100000" }];
+    if (p === "/v1/wallet/futures-wallet/details") return [200, { walletBalance: "100000", marginBalance: "100000" }];
     if (p === "/v1/exchange/exchangeInfo") {
       return [200, {
         contracts: UNIVERSE.map((c) => ({ name: `${c}USDT`, quantityPrecision: 3, maxLeverage: 20,

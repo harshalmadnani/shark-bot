@@ -24,7 +24,7 @@ function klines(index) {
 }
 
 /** A fake Shark exchange. Positions are { contractPair, quantity, positionType }. */
-function exchange({ wallet = { marginBalance: "100000" }, positions = [] } = {}) {
+function exchange({ wallet = { walletBalance: "100000", marginBalance: "100000" }, positions = [] } = {}) {
   const state = { wallet, positions: positions.map((p) => ({ ...p })), orders: [], leverageCalls: [] };
   const signed = (p) => {
     const row = state.positions.find((x) => x.contractPair === p);
@@ -101,8 +101,49 @@ test("equity is only read from real numbers", () => {
   assert.equal(rb.equityOf({ data: { marginBalance: "5000" } }), null);
   assert.equal(rb.equityOf({ marginBalance: "" }), null);
   assert.equal(rb.equityOf({ marginBalance: "0", walletBalance: "0" }), null);
-  assert.equal(rb.equityOf({ marginBalance: "5000" }), 5000);
+  assert.equal(rb.equityOf({ marginBalance: "5000" }), null, "marginBalance is free cash, never equity");
   assert.equal(rb.equityOf({ marginBalance: null, walletBalance: "5000", unrealisedPnlCross: "-100" }), 4900);
+});
+
+test("equity with positions open is walletBalance + unrealised PnL, not marginBalance", () => {
+  const equity = rb.equityOf({
+    walletBalance: "4859.96",
+    marginBalance: "3431.61",
+    lockedBalance: "1428.35",
+    unrealisedPnlCross: "120",
+    unrealisedPnlIsolated: "0",
+  });
+  assert.ok(Math.abs(equity - 4979.96) < 1e-6, `got ${equity}`);
+});
+
+test("negative unrealised PnL lowers equity", () => {
+  assert.equal(
+    rb.equityOf({ walletBalance: "5000", unrealisedPnlCross: "-300", unrealisedPnlIsolated: "-50" }),
+    4650
+  );
+});
+
+test("missing unrealised PnL fields count as zero", () => {
+  assert.equal(rb.equityOf({ walletBalance: "5000" }), 5000);
+  assert.equal(rb.equityOf({ walletBalance: "5000", unrealisedPnlCross: null, unrealisedPnlIsolated: "" }), 5000);
+});
+
+test("a missing, null, empty or zero walletBalance gives null equity", () => {
+  assert.equal(rb.equityOf({ marginBalance: "5000" }), null);
+  assert.equal(rb.equityOf({ walletBalance: null, unrealisedPnlCross: "100" }), null);
+  assert.equal(rb.equityOf({ walletBalance: "", marginBalance: "5000" }), null);
+  assert.equal(rb.equityOf({ walletBalance: "0", marginBalance: "5000" }), null);
+  assert.equal(rb.equityOf({ walletBalance: "abc" }), null);
+  assert.equal(rb.equityOf({}), null);
+  assert.equal(rb.equityOf(null), null);
+});
+
+test("unrealisedOf sums cross + isolated and treats missing fields as zero", () => {
+  assert.equal(rb.unrealisedOf({ unrealisedPnlCross: "120", unrealisedPnlIsolated: "-20" }), 100);
+  assert.equal(rb.unrealisedOf({ unrealisedPnlCross: "-75" }), -75);
+  assert.equal(rb.unrealisedOf({ unrealisedPnlIsolated: "30", unrealisedPnlCross: null }), 30);
+  assert.equal(rb.unrealisedOf({}), 0);
+  assert.equal(rb.unrealisedOf(null), null);
 });
 
 for (const [label, wallet] of [
@@ -122,7 +163,7 @@ for (const [label, wallet] of [
 }
 
 test("a real 75% drawdown still closes the book and halts", async () => {
-  const state = exchange({ wallet: { marginBalance: "20000" }, positions: [pos("BTCUSDT", 2), pos("ETHUSDT", -3)] });
+  const state = exchange({ wallet: { walletBalance: "20000", marginBalance: "20000" }, positions: [pos("BTCUSDT", 2), pos("ETHUSDT", -3)] });
   const db = account({ peak_equity: 100000 });
   const result = await rb.rebalanceAccount(ID);
   assert.equal(result.halted, true);
