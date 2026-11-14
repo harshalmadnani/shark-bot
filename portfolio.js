@@ -1,5 +1,6 @@
 const { SharkClient, sharkError, requestJson } = require("./shark");
 const store = require("./store");
+const { equityOf, unrealisedOf } = require("./rebalance");
 
 function asList(body) {
   if (Array.isArray(body)) return body;
@@ -115,8 +116,6 @@ async function loadPortfolio(row) {
 
   const walletError = sharkError(wallet);
   const body = walletError ? null : wallet.body || {};
-  const isolatedPnl = num(body && body.unrealisedPnlIsolated) || 0;
-  const crossPnl = num(body && body.unrealisedPnlCross) || 0;
   const marginBalance = num(body && body.marginBalance);
   const walletBalance = num(body && body.walletBalance);
 
@@ -129,11 +128,12 @@ async function loadPortfolio(row) {
   return {
     connected: true,
     ...store.publicAccount(row),
-    valueInr: walletBalance,
+    // Equity = walletBalance + unrealised PnL. marginBalance and lockedInr are raw, informational.
+    valueInr: equityOf(body),
     walletBalance,
     marginBalance,
     inrPerUsdt: market.rate,
-    unrealizedPnlInr: walletError ? null : isolatedPnl + crossPnl,
+    unrealizedPnlInr: walletError ? null : unrealisedOf(body),
     lockedInr: num(body && body.lockedBalance),
     asset: "INR",
     walletError,
